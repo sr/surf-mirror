@@ -14,18 +14,21 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <webkit/webkit.h>
+#include <glib/gstdio.h>
 
 #define LENGTH(x) (sizeof x / sizeof x[0])
 
 Display *dpy;
 Atom urlprop;
 typedef struct Client {
-	GtkWidget *win, *scroll, *vbox, *urlbar, *urllist, *searchbar;
+	GtkWidget *win, *scroll, *vbox, *urlbar, *searchbar;
 	WebKitWebView *view;
+	WebKitDownload * dl;
 	gchar *title;
 	gint progress;
 	struct Client *next;
 } Client;
+SoupCookieJar *cookiejar;
 Client *clients = NULL;
 gboolean embed = FALSE;
 gboolean showxid = FALSE;
@@ -80,7 +83,6 @@ destroyclient(Client *c) {
 	gtk_widget_destroy(GTK_WIDGET(webkit_web_view_new()));
 	gtk_widget_destroy(c->scroll);
 	gtk_widget_destroy(c->urlbar);
-	gtk_widget_destroy(c->urllist);
 	gtk_widget_destroy(c->searchbar);
 	gtk_widget_destroy(c->vbox);
 	gtk_widget_destroy(c->win);
@@ -113,8 +115,9 @@ download(WebKitWebView *view, WebKitDownload *o, gpointer d) {
 	gchar *uri, *filename;
 
 	home = g_get_home_dir();
-	filename = g_build_filename(home, "Desktop",
+	filename = g_build_filename(home, ".surf", "dl", 
 			webkit_download_get_suggested_filename(o), NULL);
+	g_mkdir(g_path_get_dirname(filename), 0755);
 	uri = g_strconcat("file://", filename, NULL);
 	webkit_download_set_destination_uri(o, uri);
 	g_free(filename);
@@ -244,11 +247,13 @@ loadfile(const Client *c, const gchar *f) {
 	if(strcmp(f, "-") == 0) {
 		chan = g_io_channel_unix_new(STDIN_FILENO);
 		if (chan) {
-			while(g_io_channel_read_line(chan, &line, NULL, NULL, &e) == G_IO_STATUS_NORMAL) {
+			while(g_io_channel_read_line(chan, &line, NULL, NULL,
+						&e) == G_IO_STATUS_NORMAL) {
 				g_string_append(code, line);
 				g_free(line);
 			}
-			webkit_web_view_load_html_string(c->view, code->str, NULL);
+			webkit_web_view_load_html_string(c->view, code->str,
+					"file://.");
 			g_io_channel_shutdown(chan, FALSE, NULL);
 		}
 	}
@@ -340,7 +345,6 @@ newclient(void) {
 
 WebKitWebView *
 newwindow(WebKitWebView  *v, WebKitWebFrame *f, gpointer d) {
-	/* TODO */
 	Client *c = newclient();
 	return c->view;
 }
@@ -419,8 +423,10 @@ updatetitle(Client *c) {
 
 int main(int argc, char *argv[]) {
 	gchar *uri = NULL, *file = NULL;
+        SoupSession *s;
 	Client *c;
 	int o;
+        const gchar *home, *filename;
 
 	gtk_init(NULL, NULL);
 	if (!g_thread_supported())
@@ -462,6 +468,14 @@ int main(int argc, char *argv[]) {
 		goto argerr;
 	if(!clients)
 		newclient();
+
+        /* cookie persistance */
+        s = webkit_get_default_session();
+        home = g_get_home_dir();
+        filename = g_build_filename(home, ".surf-cookies", NULL);
+        cookiejar = soup_cookie_jar_text_new(filename, FALSE);
+        soup_session_add_feature(s, SOUP_SESSION_FEATURE(cookiejar));
+
 	gtk_main();
 	cleanup();
 	return EXIT_SUCCESS;
