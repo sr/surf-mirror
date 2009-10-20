@@ -62,7 +62,7 @@ typedef struct {
 
 static Display *dpy;
 static Atom uriprop;
-static SoupCookieJar *cookiejar;
+static SoupCookieJar *cookies;
 static SoupSession *session;
 static Client *clients = NULL;
 static GdkNativeWindow embed = 0;
@@ -70,6 +70,7 @@ static gboolean showxid = FALSE;
 static gboolean ignore_once = FALSE;
 static char winid[64];
 static char *progname;
+static gboolean lockcookie = FALSE;
 
 static const char *autouri(Client *c);
 static char *buildpath(const char *path);
@@ -93,7 +94,6 @@ static void itemclick(GtkMenuItem *mi, Client *c);
 static gboolean keypress(GtkWidget *w, GdkEventKey *ev, Client *c);
 static void linkhover(WebKitWebView *v, const char* t, const char* l, Client *c);
 static void loadcommit(WebKitWebView *v, WebKitWebFrame *f, Client *c);
-static void loadfinished(WebKitWebView *v, WebKitWebFrame *f, Client *c);
 static void loadstart(WebKitWebView *v, WebKitWebFrame *f, Client *c);
 static void loaduri(Client *c, const Arg *arg);
 static void navigate(Client *c, const Arg *arg);
@@ -104,8 +104,8 @@ static void pasteuri(GtkClipboard *clipboard, const char *text, gpointer d);
 static GdkFilterReturn processx(GdkXEvent *xevent, GdkEvent *event, gpointer d);
 static void print(Client *c, const Arg *arg);
 static void progresschange(WebKitWebView *v, gint p, Client *c);
+static void reloadcookies();
 static void reload(Client *c, const Arg *arg);
-static void reloadcookie();
 static void sigchld(int unused);
 static void setup(void);
 static void spawn(Client *c, const Arg *arg);
@@ -157,15 +157,24 @@ buildpath(const char *path) {
 }
 
 void
-changecookie(SoupCookieJar *jar, SoupCookie *oc, SoupCookie *c, gpointer p) {
+changecookie(SoupCookieJar *j, SoupCookie *oc, SoupCookie *c, gpointer p) {
 	SoupDate *e;
+	SoupCookieJar *jar;
 
+	if(lockcookie)
+		return;
 	if(c && c->expires == NULL) {
 		e = soup_date_new_from_time_t(time(NULL) + sessiontime);
 		c = soup_cookie_copy(c);
 		soup_cookie_set_expires(c, e);
-		soup_cookie_jar_add_cookie(cookiejar, c);
 	}
+	
+	jar = soup_cookie_jar_text_new(cookiefile, FALSE);
+	if(c)
+		soup_cookie_jar_add_cookie(jar, soup_cookie_copy(c));
+	else
+		soup_cookie_jar_delete_cookie(jar, oc);
+	g_object_unref(jar);
 }
 
 void
@@ -407,16 +416,12 @@ loadcommit(WebKitWebView *view, WebKitWebFrame *f, Client *c) {
 	XChangeProperty(dpy, GDK_WINDOW_XID(GTK_WIDGET(c->win)->window), uriprop,
 			XA_STRING, 8, PropModeReplace, (unsigned char *)uri,
 			strlen(uri) + 1);
-}
 
-void
-loadfinished(WebKitWebView *v, WebKitWebFrame *f, Client *c) {
-	reloadcookie();
+	reloadcookies();
 }
 
 void
 loadstart(WebKitWebView *view, WebKitWebFrame *f, Client *c) {
-	reloadcookie();
 	c->progress = 0;
 	update(c);
 }
@@ -488,7 +493,6 @@ newclient(void) {
 	c->view = WEBKIT_WEB_VIEW(webkit_web_view_new());
 	g_signal_connect(G_OBJECT(c->view), "title-changed", G_CALLBACK(titlechange), c);
 	g_signal_connect(G_OBJECT(c->view), "load-progress-changed", G_CALLBACK(progresschange), c);
-	g_signal_connect(G_OBJECT(c->view), "load-finished", G_CALLBACK(loadfinished), c);
 	g_signal_connect(G_OBJECT(c->view), "load-committed", G_CALLBACK(loadcommit), c);
 	g_signal_connect(G_OBJECT(c->view), "load-started", G_CALLBACK(loadstart), c);
 	g_signal_connect(G_OBJECT(c->view), "hovering-over-link", G_CALLBACK(linkhover), c);
@@ -641,14 +645,21 @@ reload(Client *c, const Arg *arg) {
 }
 
 void
-reloadcookie(void) {
-	SoupSession *s;
+reloadcookies() {
+	SoupCookieJar *jar;
+	GSList *l, *e;
 
-	/* This forces the cookie to be written to hdd */
-	s = webkit_get_default_session();
-	soup_session_remove_feature(s, SOUP_SESSION_FEATURE(cookiejar));
-	soup_session_add_feature(s, SOUP_SESSION_FEATURE(cookiejar));
-} 
+	lockcookie = TRUE;
+	for(l = e = soup_cookie_jar_all_cookies(cookies); e; e = e->next)
+		soup_cookie_jar_delete_cookie(cookies, (SoupCookie *)e->data);
+	soup_cookies_free(l);
+	jar = soup_cookie_jar_text_new(cookiefile, TRUE);
+	for(l = e = soup_cookie_jar_all_cookies(jar); e; e = e->next)
+		soup_cookie_jar_add_cookie(cookies, (SoupCookie *)e->data);
+	g_slist_free(l);
+	lockcookie = FALSE;
+	g_object_unref(jar);
+}
 
 void
 scroll(Client *c, const Arg *arg) {
@@ -692,9 +703,10 @@ setup(void) {
 
 	/* cookie persistance */
 	s = webkit_get_default_session();
-	cookiejar = soup_cookie_jar_text_new(cookiefile, FALSE);
-	soup_session_add_feature(s, SOUP_SESSION_FEATURE(cookiejar));
-	g_signal_connect(cookiejar, "changed", G_CALLBACK(changecookie), NULL);
+	cookies = soup_cookie_jar_new();
+	soup_session_add_feature(s, SOUP_SESSION_FEATURE(cookies));
+	g_signal_connect(cookies, "changed", G_CALLBACK(changecookie), NULL);
+	reloadcookies();
 }
 
 void
